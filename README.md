@@ -18,7 +18,7 @@ That system ran on a large cloud model. fewkeys tries the same idea with small o
 
 - **Privacy.** A person's conversations with family, nurses and doctors stay on their machine.
 - **No internet needed.** It keeps working in hospitals, on the road and during outages.
-- **Free.** It's open source (MIT), with nothing to subscribe to.
+- **Free.** It's open source (Apache-2.0), with nothing to subscribe to.
 
 ## Where suggestions come from
 
@@ -145,4 +145,4 @@ If you use AAC, or support someone who does, and want to try fewkeys or tell us 
 python -m unittest test_fewkeys.py
 ```
 
-Made by MV2 of Munim, Inc. with AI agents. MIT license.
+Made by MV2 of Munim, Inc. with AI agents. Apache-2.0 license.

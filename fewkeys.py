@@ -11,7 +11,7 @@ The idea follows Google's SpeakFaster study (Cai et al., Nature Communications
 on an ordinary laptop. Small models rarely keep to "one word per letter" on
 their own, so fewkeys holds them to the letters with a JSON-schema grammar, and
 ranks the sentences the model proposes again and again first.
-Standard library only. MIT licensed.
+Standard library only. Apache-2.0 licensed.
 Made by MV2 of Munim, Inc. with AI agents.
 """
 
