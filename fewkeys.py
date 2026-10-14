@@ -8,7 +8,9 @@ running, a local language model served by Ollama. Nothing leaves the machine.
 
 The idea follows Google's SpeakFaster study (Cai et al., Nature Communications
 2024), which used a cloud model; fewkeys does the same with small open models
-on an ordinary laptop. Standard library only. MIT licensed.
+on an ordinary laptop. Small models rarely keep to "one word per letter" on
+their own, so fewkeys holds them to the letters with a JSON-schema grammar.
+Standard library only. MIT licensed.
 Made by MV2 of Munim, Inc. with AI agents.
 """
 
@@ -22,19 +24,33 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_MODEL = "auto"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 MAX_BODY = 64 * 1024
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
+# Small instruction models that answer quickly on a laptop CPU, best first.
+# "auto" picks the first one installed, else the smallest installed model.
+PREFERRED_MODELS = (
+    "llama3.2:3b",
+    "qwen2.5:3b",
+    "gemma3:4b",
+    "phi4-mini",
+    "qwen2.5:1.5b",
+    "llama3.2:1b",
+    "gemma3:1b",
+)
+
 WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’\-]*")
 NUMBERING_RE = re.compile(r"^\s*(?:\(?\d{1,2}[.):]\s*|[-*•–]\s+)")
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 Abbreviation = collections.namedtuple("Abbreviation", "initials keywords")
 
@@ -140,6 +156,10 @@ BENCH_PHRASES = (
 )
 
 
+class ModelError(ValueError):
+    """Ollama answered, but refused the request (unknown model, bad format...)."""
+
+
 def words(phrase):
     """Split a phrase into words; punctuation is ignored, "I'm" is one word."""
     return WORD_RE.findall(phrase)
@@ -182,6 +202,50 @@ def matches(phrase, abbrev):
     return all(any(w.startswith(k) for w in lowered) for k in abbrev.keywords)
 
 
+def sentence_pattern(initials):
+    """A fully anchored regex for one sentence with one word per initial.
+
+    Ollama turns it into a grammar, so the model can only write words that
+    start with the typed letters, in order.
+    """
+    parts = []
+    for ch in initials:
+        first = "[%s%s]" % (ch.lower(), ch.upper()) if ch.lower() != ch.upper() else "[%s]" % ch
+        parts.append(first + "[A-Za-z0-9']*")
+    return "^" + ",? ".join(parts) + "[.?!]?$"
+
+
+def sentence_schema(abbrev, n=5):
+    return {
+        "type": "object",
+        "properties": {
+            "sentences": {
+                "type": "array",
+                "items": {"type": "string", "pattern": sentence_pattern(abbrev.initials)},
+                "minItems": 1,
+                "maxItems": n,
+            },
+        },
+        "required": ["sentences"],
+    }
+
+
+def choose_model(models):
+    """Pick a model name from Ollama's /api/tags list, or None if there is none."""
+    sizes = {}
+    for m in models:
+        name = m.get("name") or m.get("model") or ""
+        if name and "embed" not in name:
+            sizes[name] = m.get("size") or 0
+    for want in PREFERRED_MODELS:
+        for name in sizes:
+            if name == want or name == want + ":latest":
+                return name
+    if not sizes:
+        return None
+    return min(sizes, key=lambda name: (sizes[name], name))
+
+
 def clean_candidate(line, initials=None):
     line = NUMBERING_RE.sub("", line.strip(), count=1)
     if initials:
@@ -205,26 +269,56 @@ def parse_model_output(text, initials=None):
     return out
 
 
-def build_prompt(abbrev, context=(), n=5):
+def parse_json_sentences(text):
+    """Read {"sentences": [...]} from a model reply, even if it was cut short."""
+    text = THINK_RE.sub("", text or "")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        data = data.get("sentences")
+    if isinstance(data, list):
+        return [" ".join(s.split()) for s in data if isinstance(s, str) and s.strip()]
+    found = []
+    for m in JSON_STRING_RE.finditer(text):
+        try:
+            s = json.loads(m.group(0))
+        except ValueError:
+            continue
+        if s != "sentences" and s.strip():
+            found.append(" ".join(s.split()))
+    return found or parse_model_output(text)
+
+
+def build_prompt(abbrev, context=(), n=5, examples=(), as_json=False):
     lines = [
         "You help a person with a motor disability talk faster. "
         "They type only the first letter of each word.",
         "Guess what they want to say. Each letter is the first letter of one word, "
         "in order, so the sentence has exactly as many words as there are letters.",
         "Write natural, everyday sentences in the first person, the way people really talk.",
-        "",
-        "Examples:",
     ]
+    if examples:
+        lines += ["", "Things this person often says:"]
+        for letters, sentence in examples:
+            lines.append("%s -> %s" % (letters, sentence))
+    lines += ["", "Examples:"]
     for letters, sentence in EXAMPLES:
         lines.append("%s -> %s" % (letters, sentence))
     turns = [c.strip() for c in context if c and c.strip()]
     if turns:
         lines += ["", "The conversation so far:"] + turns[-8:]
-    lines += ["", "Letters: %s (%d words)" % (abbrev.initials, len(abbrev.initials))]
+    lines += ["", "Letters: %s (%d words)" % (abbrev.initials, len(abbrev.initials)),
+              "The words start with: " + ", ".join(abbrev.initials)]
     if abbrev.keywords:
         lines.append("Use these words (or words starting with them): " + ", ".join(abbrev.keywords))
-    lines.append("Write %d different possible sentences, one per line, "
-                 "with no numbers and nothing else." % n)
+    if as_json:
+        lines.append('Answer in JSON as {"sentences": [...]} with up to %d different '
+                     "possible sentences." % n)
+    else:
+        lines.append("Write %d different possible sentences, one per line, "
+                     "with no numbers and nothing else." % n)
     return "\n".join(lines)
 
 
@@ -238,19 +332,45 @@ class OllamaClient:
         # Talk to the local server directly, never through a configured proxy.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def generate(self, prompt, temperature=0.2):
-        body = json.dumps({
-            "model": self.model,
+    def _call(self, path, payload=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(self.base_url + path, data=data,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with self.opener.open(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = json.loads(e.read().decode("utf-8")).get("error") or ""
+            except (OSError, ValueError, AttributeError):
+                pass
+            finally:
+                e.close()
+            raise ModelError(detail or "Ollama answered HTTP %d" % e.code)
+
+    def resolve_model(self):
+        if self.model == "auto":
+            tags = self._call("/api/tags")
+            name = choose_model(tags.get("models") or [])
+            if not name:
+                raise ModelError("no Ollama model is installed; try: ollama pull "
+                                 + PREFERRED_MODELS[0])
+            self.model = name
+        return self.model
+
+    def generate(self, prompt, temperature=0.2, schema=None):
+        payload = {
+            "model": self.resolve_model(),
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": temperature, "num_predict": 200},
-        }).encode("utf-8")
-        req = urllib.request.Request(self.base_url + "/api/generate", data=body,
-                                     headers={"Content-Type": "application/json"})
-        with self.opener.open(req, timeout=self.timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            "options": {"temperature": temperature, "num_predict": 256},
+        }
+        if schema is not None:
+            payload["format"] = schema
+        data = self._call("/api/generate", payload)
         if "error" in data:
-            raise ValueError(data["error"])
+            raise ModelError(data["error"])
         return data.get("response", "")
 
 
@@ -275,10 +395,21 @@ class PhraseBank:
         rec["count"] += 1
         rec["last"] = time.time() if now is None else now
 
+    def _ranked(self):
+        return sorted(self.phrases, key=lambda p: (-self.phrases[p]["count"], -self.phrases[p]["last"]))
+
     def suggest(self, abbrev, limit=8):
-        hits = [p for p in self.phrases if matches(p, abbrev)]
-        hits.sort(key=lambda p: (-self.phrases[p]["count"], -self.phrases[p]["last"]))
-        return hits[:limit]
+        return [p for p in self._ranked() if matches(p, abbrev)][:limit]
+
+    def examples(self, k=3):
+        """The person's most used sentences, as (letters, sentence) for the prompt."""
+        out = []
+        for phrase in self._ranked():
+            if len(out) >= k:
+                break
+            if 2 <= len(words(phrase)) <= 12:
+                out.append((initials_of(phrase), phrase))
+        return out
 
     def save(self):
         if not self.path:
@@ -291,11 +422,14 @@ class PhraseBank:
         os.replace(tmp, self.path)
 
 
-def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_common=True):
+def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_common=True,
+           constrain=True):
     """Return sentences that fit the typed letters, best first.
 
     Order: the person's own phrases, then everyday phrases, then model
-    guesses. Model guesses that do not fit the letters are dropped.
+    guesses. Model guesses that do not fit the letters are dropped. With
+    constrain, the model is held to the letters by a grammar; an Ollama that
+    refuses the grammar is asked again in plain text.
     """
     abbrev = parse_abbreviation(text)
     out, seen = [], set()
@@ -314,24 +448,39 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_comm
             if matches(phrase, abbrev):
                 take(phrase, "common")
     error = None
+    constrained = False
     if client is not None:
-        prompt = build_prompt(abbrev, context)
-        for r in range(rounds):
-            if len(out) >= limit:
-                break
+        examples = bank.examples() if bank is not None else ()
+        schema = sentence_schema(abbrev) if constrain else None
+        r = 0
+        while r < rounds and len(out) < limit:
+            prompt = build_prompt(abbrev, context, examples=examples, as_json=schema is not None)
             try:
-                reply = client.generate(prompt, temperature=0.2 + 0.5 * r)
+                reply = client.generate(prompt, temperature=0.2 + 0.5 * r, schema=schema)
+            except ModelError as e:
+                if schema is not None:
+                    # Older Ollama versions cannot take a schema; ask in plain text.
+                    schema = None
+                    continue
+                error = str(e) or e.__class__.__name__
+                break
             except (OSError, ValueError) as e:
                 error = str(e) or e.__class__.__name__
                 break
-            for candidate in parse_model_output(reply, abbrev.initials):
+            if schema is not None:
+                constrained = True
+                candidates = parse_json_sentences(reply)
+            else:
+                candidates = parse_model_output(reply, abbrev.initials)
+            for candidate in candidates:
                 if matches(candidate, abbrev):
                     take(candidate, "model")
+            r += 1
     return {"abbreviation": abbrev.initials, "keywords": list(abbrev.keywords),
-            "suggestions": out, "model_error": error}
+            "suggestions": out, "model_error": error, "constrained": constrained}
 
 
-def bench(phrases, client, limit=5, rounds=2):
+def bench(phrases, client, limit=5, rounds=2, constrain=True):
     """Measure how often the model recovers a sentence from its initials alone.
 
     Keystroke saving counts the letters plus one selection for a hit, and the
@@ -342,13 +491,15 @@ def bench(phrases, client, limit=5, rounds=2):
         letters = initials_of(phrase)
         start = time.monotonic()
         result = expand(letters, (), bank=None, client=client, limit=limit,
-                        rounds=rounds, use_common=False)
+                        rounds=rounds, use_common=False, constrain=constrain)
         seconds = time.monotonic() - start
         texts = [normalize(s["text"]) for s in result["suggestions"]]
         target = normalize(phrase)
         rank = texts.index(target) + 1 if target in texts else None
         rows.append({"phrase": phrase, "letters": letters, "rank": rank,
-                     "seconds": round(seconds, 2), "error": result["model_error"]})
+                     "seconds": round(seconds, 2), "error": result["model_error"],
+                     "constrained": result["constrained"],
+                     "suggestions": [s["text"] for s in result["suggestions"]]})
     n = len(rows) or 1
     full = sum(len(r["phrase"]) for r in rows)
     keys = sum(len(r["letters"]) + (1 if r["rank"] else len(r["phrase"])) for r in rows)
@@ -356,8 +507,10 @@ def bench(phrases, client, limit=5, rounds=2):
         "phrases": len(rows),
         "top1": round(sum(1 for r in rows if r["rank"] == 1) / n, 3),
         "top5": round(sum(1 for r in rows if r["rank"]) / n, 3),
+        "fitting_per_phrase": round(sum(len(r["suggestions"]) for r in rows) / n, 2),
         "mean_seconds": round(sum(r["seconds"] for r in rows) / n, 2),
         "keystroke_saving": round(1 - keys / full, 3) if full else 0.0,
+        "constrained": round(sum(1 for r in rows if r["constrained"]) / n, 3),
         "errors": sum(1 for r in rows if r["error"]),
     }
     return {"summary": summary, "rows": rows}
@@ -384,17 +537,20 @@ class Piper:
 
 
 class App:
-    def __init__(self, bank, client=None, piper=None, limit=8, allow_any_host=False):
+    def __init__(self, bank, client=None, piper=None, limit=8, allow_any_host=False,
+                 constrain=True):
         self.bank = bank
         self.client = client
         self.piper = piper
         self.limit = limit
         self.allow_any_host = allow_any_host
+        self.constrain = constrain
         self.lock = threading.Lock()
 
     def expand(self, text, context):
         with self.lock:
-            return expand(text, context, bank=self.bank, client=self.client, limit=self.limit)
+            return expand(text, context, bank=self.bank, client=self.client, limit=self.limit,
+                          constrain=self.constrain)
 
     def said(self, text):
         with self.lock:
@@ -487,9 +643,15 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not found"})
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # On Windows SO_REUSEADDR lets a second server share a busy port silently.
+    allow_reuse_address = os.name != "nt"
+
+
 def make_server(app, host="127.0.0.1", port=8765):
     handler = type("FewkeysHandler", (_Handler,), {"app": app})
-    return ThreadingHTTPServer((host, port), handler)
+    return _Server((host, port), handler)
 
 
 PAGE = """<!doctype html>
@@ -502,7 +664,9 @@ PAGE = """<!doctype html>
   :root { color-scheme: light dark; }
   body { font: 1.4rem/1.4 system-ui, sans-serif; margin: 0 auto; max-width: 60rem; padding: 1rem; }
   label { display: block; font-weight: 600; margin-top: 1rem; }
+  label.inline { display: flex; align-items: center; gap: .6rem; font-weight: 400; }
   input { font: inherit; width: 100%; box-sizing: border-box; padding: .6rem; border: 2px solid; border-radius: .4rem; }
+  input[type=checkbox] { width: 2rem; height: 2rem; flex: none; }
   button { font: inherit; min-height: 3.5rem; padding: .5rem 1rem; margin: .3rem 0; border: 2px solid; border-radius: .4rem; cursor: pointer; }
   #choices button { display: block; width: 100%; text-align: left; }
   :focus-visible { outline: 4px solid #1a5fb4; outline-offset: 2px; }
@@ -520,6 +684,7 @@ PAGE = """<!doctype html>
   <label for="letters">Your letters</label>
   <input id="letters" autocomplete="off" autocapitalize="off" spellcheck="false" required>
   <button type="submit">Show sentences</button>
+  <label class="inline"><input type="checkbox" id="copy"> Also copy the sentence I choose, to paste into another app</label>
 </form>
 <p id="status" role="status" aria-live="polite"></p>
 <h2 id="choices-heading">Sentences</h2>
@@ -530,6 +695,9 @@ PAGE = """<!doctype html>
 <script>
 const turns = [];
 const $ = (id) => document.getElementById(id);
+
+$("copy").checked = localStorage.getItem("fewkeys-copy") === "1";
+$("copy").addEventListener("change", () => localStorage.setItem("fewkeys-copy", $("copy").checked ? "1" : "0"));
 
 function post(path, body) {
   return fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -543,6 +711,10 @@ function addTurn(who, text) {
 }
 
 async function say(text) {
+  let copied = false;
+  if ($("copy").checked && navigator.clipboard) {
+    try { await navigator.clipboard.writeText(text); copied = true; } catch (e) {}
+  }
   addTurn("Me", text);
   post("/said", {text});
   $("choices").replaceChildren();
@@ -559,7 +731,7 @@ async function say(text) {
   if (!spoken && "speechSynthesis" in window) {
     speechSynthesis.speak(new SpeechSynthesisUtterance(text));
   }
-  $("status").textContent = "Said: " + text;
+  $("status").textContent = "Said: " + text + (copied ? " (copied)" : "");
   $("letters").focus();
 }
 
@@ -595,7 +767,7 @@ $("ask").addEventListener("submit", async (ev) => {
   });
   let msg = data.suggestions.length + " sentences.";
   if (!data.suggestions.length) msg = "No sentences yet. Try adding a word after a slash.";
-  if (data.model_error) msg += " The local model did not answer, so only saved and common phrases are shown.";
+  if (data.model_error) msg += " The local model did not answer (" + data.model_error + "), so only saved and common phrases are shown.";
   $("status").textContent = msg;
   if (data.suggestions.length) box.querySelector("button").focus();
 });
@@ -614,8 +786,11 @@ def main(argv=None):
                                 "offline abbreviation expansion for slow typists.")
     p.add_argument("--bank", default=default_bank_path(), help="phrase history file")
     p.add_argument("--model", default=DEFAULT_MODEL,
-                   help="Ollama model name; pass an empty string to work without a model")
+                   help='Ollama model name; "auto" (default) picks a small installed model; '
+                        "pass an empty string to work without a model")
     p.add_argument("--ollama", default=DEFAULT_OLLAMA, help="Ollama server URL")
+    p.add_argument("--plain", action="store_true",
+                   help="do not hold the model to the letters with a grammar")
     p.add_argument("--version", action="version", version="fewkeys " + __version__)
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("expand", help="print sentences for some letters")
@@ -635,6 +810,7 @@ def main(argv=None):
 
     bank = PhraseBank(args.bank)
     client = OllamaClient(args.ollama, args.model) if args.model else None
+    constrain = not args.plain
 
     if args.cmd == "add":
         bank.add(" ".join(args.phrase))
@@ -642,7 +818,8 @@ def main(argv=None):
         return 0
     if args.cmd == "expand":
         try:
-            result = expand(args.letters, args.context, bank=bank, client=client)
+            result = expand(args.letters, args.context, bank=bank, client=client,
+                            constrain=constrain)
         except ValueError as err:
             print("fewkeys: %s" % err, file=sys.stderr)
             return 2
@@ -655,16 +832,22 @@ def main(argv=None):
         if client is None:
             print("fewkeys: bench needs a model (--model)", file=sys.stderr)
             return 2
-        report = bench(BENCH_PHRASES, client)
-        print(json.dumps(dict(report["summary"], model=args.model), indent=1))
+        report = bench(BENCH_PHRASES, client, constrain=constrain)
+        info = {"model": client.model, "fewkeys": __version__}
+        print(json.dumps(dict(report["summary"], **info), indent=1))
         if args.json:
             with open(args.json, "w", encoding="utf-8") as f:
-                json.dump(dict(report, model=args.model), f, indent=1)
+                json.dump(dict(report, **info), f, indent=1)
         return 0
     piper = Piper(args.piper_model, args.piper) if args.piper_model else None
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
-    app = App(bank, client, piper, allow_any_host=not loopback)
-    server = make_server(app, args.host, args.port)
+    app = App(bank, client, piper, allow_any_host=not loopback, constrain=constrain)
+    try:
+        server = make_server(app, args.host, args.port)
+    except OSError as err:
+        print("fewkeys: cannot listen on port %d (%s); try --port %d"
+              % (args.port, err, args.port + 1), file=sys.stderr)
+        return 2
     print("fewkeys %s is running on http://%s:%d/  (Ctrl+C to stop)"
           % (__version__, "localhost" if loopback else args.host, server.server_address[1]))
     try:
