@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 DEFAULT_MODEL = "auto"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
@@ -38,6 +38,10 @@ DEFAULT_PORT = 8765
 PORT_TRIES = 10
 MAX_BODY = 64 * 1024
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+# `bench --dialogues`: how many dialogues to take, and the longest turn kept
+# (SpeakFaster's limit: 10 words and mid-sentence punctuation marks).
+DEFAULT_DIALOGUE_LIMIT = 100
+MAX_TURN_LENGTH = 10
 
 # Small instruction models that answer quickly on a laptop CPU, best first.
 # "auto" picks the first one installed, else the smallest installed model.
@@ -55,6 +59,7 @@ WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’\-]*")
 NUMBERING_RE = re.compile(r"^\s*(?:\(?\d{1,2}[.):]\s*|[-*•–]\s+)")
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+MID_PUNCT_RE = re.compile(r"[,.;:!?]+(?=.*[A-Za-z0-9])")
 
 Abbreviation = collections.namedtuple("Abbreviation", "initials keywords")
 
@@ -182,6 +187,11 @@ def normalize(phrase):
 
 def initials_of(phrase):
     return "".join(w[0].lower() for w in words(phrase))
+
+
+def turn_length(phrase):
+    """Words plus mid-sentence punctuation marks, the length SpeakFaster limited."""
+    return len(words(phrase)) + len(MID_PUNCT_RE.findall(phrase))
 
 
 def parse_abbreviation(text):
@@ -517,6 +527,30 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=DEFAULT_ROU
             take(vote["text"], "model")
     return {"abbreviation": abbrev.initials, "keywords": list(abbrev.keywords),
             "suggestions": out, "model_error": error, "constrained": constrained}
+
+
+def load_dialogues(path, split="test", limit=DEFAULT_DIALOGUE_LIMIT, max_length=MAX_TURN_LENGTH):
+    """Read bench items from Vertanen's Turk Dialogues (https://aactext.org/turk/).
+
+    turk-dialogues.txt has one dialogue per line: the split (train, dev or
+    test), an id and six turns, separated by tabs. Like SpeakFaster's main
+    test, each item is a dialogue's second turn with its first turn as
+    context, kept if it has at most max_length words and mid-sentence
+    punctuation marks. Returns (first turn, second turn) pairs in file order;
+    limit 0 keeps them all.
+    """
+    items = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            fields = [" ".join(x.split()) for x in line.split("\t")]
+            if len(fields) < 4 or fields[0] != split:
+                continue
+            turn, reply = fields[2], fields[3]
+            if turn and words(reply) and turn_length(reply) <= max_length:
+                items.append((turn, reply))
+                if limit and len(items) >= limit:
+                    break
+    return items
 
 
 def bench(phrases, client, limit=5, rounds=DEFAULT_ROUNDS, constrain=True, contexts=None):
@@ -870,6 +904,11 @@ def main(argv=None):
     b.add_argument("--json", help="also write full results to this file")
     b.add_argument("--context", action="store_true",
                    help="show the model what the other person just said before each sentence")
+    b.add_argument("--dialogues", metavar="FILE",
+                   help="use the test split of Vertanen's Turk Dialogues instead of the built-in "
+                        "sentences (turk-dialogues.txt from https://aactext.org/turk/)")
+    b.add_argument("--limit", type=int, default=DEFAULT_DIALOGUE_LIMIT,
+                   help="dialogues to take from --dialogues, 0 for all (default %(default)s)")
     args = p.parse_args(argv)
 
     bank = PhraseBank(args.bank)
@@ -897,11 +936,23 @@ def main(argv=None):
         if client is None:
             print("fewkeys: bench needs a model (--model)", file=sys.stderr)
             return 2
-        contexts = [["Them: " + turn] for turn, _ in BENCH_DIALOGUES] if args.context else None
-        report = bench(BENCH_PHRASES, client, rounds=rounds, constrain=constrain,
-                       contexts=contexts)
+        dialogues, source = BENCH_DIALOGUES, "built-in"
+        if args.dialogues:
+            try:
+                dialogues = load_dialogues(args.dialogues, limit=max(0, args.limit))
+            except OSError as err:
+                print("fewkeys: cannot read %s (%s)" % (args.dialogues, err), file=sys.stderr)
+                return 2
+            if not dialogues:
+                print("fewkeys: no test dialogues in %s; use turk-dialogues.txt, "
+                      "not the filtered file" % args.dialogues, file=sys.stderr)
+                return 2
+            source = "turk-dialogues test"
+        contexts = [["Them: " + turn] for turn, _ in dialogues] if args.context else None
+        report = bench([reply for _, reply in dialogues], client, rounds=rounds,
+                       constrain=constrain, contexts=contexts)
         info = {"model": client.model, "fewkeys": __version__, "rounds": rounds,
-                "grammar": constrain, "context": args.context}
+                "grammar": constrain, "context": args.context, "set": source}
         print(json.dumps(dict(report["summary"], **info), indent=1))
         if args.json:
             with open(args.json, "w", encoding="utf-8") as f:

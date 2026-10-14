@@ -9,11 +9,31 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import fewkeys as fk  # noqa: E402
+
+# A few lines in the layout of turk-dialogues.txt (split, id, six turns),
+# written for the tests, plus one line in the filtered file's layout.
+TURK_SAMPLE = (
+    "set\tid\tturn1\tturn2\tturn3\tturn4\tturn5\tturn6\n"
+    "train\tc1\tWould you like to sit down?\tNo, I'm fine standing up\tOkay\tThanks\tSure\tBye\n"
+    "test\tc2\tWhat's the weather forecast?\tHot and  humid.\tUgh.\tI know\tStay in\tYes\n"
+    "test\tc3\tHow was it?\tIt was one of the longest and most boring days I have ever had"
+    "\tOh\tNo\tYes\tOk\n"
+    "test\tc4\tAre you hungry?\tYes, a little\tPizza?\tSure\tOk\tGood\n"
+    "c5\tIs this the filtered file?\tYes it is\tOh\tOk\tFine\tBye\n"
+)
+
+
+def write_file(folder, name, text):
+    path = os.path.join(folder, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
 
 
 class FakeClient:
@@ -89,6 +109,12 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(fk.matches("I'm too hot", "ith"))
         self.assertTrue(fk.matches("Let's watch the game!", "lwtg"))
         self.assertEqual(fk.initials_of("Please wait, I am typing"), "pwiat")
+
+    def test_turn_length_counts_mid_sentence_punctuation(self):
+        self.assertEqual(fk.turn_length("No, I'm fine standing up"), 6)
+        self.assertEqual(fk.turn_length("Hot and humid."), 3)
+        self.assertEqual(fk.turn_length("Yes. Dr. Lee said so!"), 7)
+        self.assertEqual(fk.turn_length("Wait... what?"), 3)
 
     def test_word_accuracy(self):
         target = "Can you turn the volume up a little"
@@ -187,6 +213,28 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(fk.choose_model([{"name": "phi4-mini:latest", "size": 2}]),
                          "phi4-mini:latest")
         self.assertIsNone(fk.choose_model([]))
+
+
+class DialogueFileTests(unittest.TestCase):
+    def test_load_dialogues_takes_short_second_turns_of_the_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_file(tmp, "turk-dialogues.txt", TURK_SAMPLE)
+            self.assertEqual(fk.load_dialogues(path),
+                             [("What's the weather forecast?", "Hot and humid."),
+                              ("Are you hungry?", "Yes, a little")])
+            self.assertEqual(fk.load_dialogues(path, limit=1),
+                             [("What's the weather forecast?", "Hot and humid.")])
+            self.assertEqual(fk.load_dialogues(path, split="train"),
+                             [("Would you like to sit down?", "No, I'm fine standing up")])
+            self.assertEqual(fk.load_dialogues(path, max_length=3),
+                             [("What's the weather forecast?", "Hot and humid.")])
+
+    def test_filtered_file_has_no_split_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_file(tmp, "turk-dialogues-filtered.txt",
+                              "id\tturn1\tturn2\tturn3\tturn4\tturn5\tturn6\n"
+                              "c5\tIs this the filtered file?\tYes it is\tOh\tOk\tFine\tBye\n")
+            self.assertEqual(fk.load_dialogues(path), [])
 
 
 class ExpandTests(unittest.TestCase):
@@ -354,6 +402,52 @@ class CliTests(unittest.TestCase):
             code = fk.main(["--bank", "", "--model", "", "bench", "--context"])
         self.assertEqual(code, 2)
         self.assertIn("needs a model", err.getvalue())
+
+    def test_bench_on_dialogues(self):
+        client = FakeClient(['{"sentences": ["Hot and humid."]}',
+                             '{"sentences": ["Yes, a lot"]}'])
+        client.model = "fake:1b"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_file(tmp, "turk-dialogues.txt", TURK_SAMPLE)
+            report_path = os.path.join(tmp, "report.json")
+            out = io.StringIO()
+            with mock.patch.object(fk, "OllamaClient", lambda *args: client), \
+                    contextlib.redirect_stdout(out):
+                code = fk.main(["--bank", "", "--model", "fake:1b", "--rounds", "1", "bench",
+                                "--dialogues", path, "--context", "--json", report_path])
+            self.assertEqual(code, 0)
+            summary = json.loads(out.getvalue())
+            with open(report_path, encoding="utf-8") as f:
+                report = json.load(f)
+        self.assertEqual(summary["phrases"], 2)
+        self.assertEqual(summary["top1"], 0.5)
+        self.assertEqual(summary["set"], "turk-dialogues test")
+        self.assertTrue(summary["context"])
+        self.assertEqual(summary["model"], "fake:1b")
+        self.assertEqual(summary["fewkeys"], fk.__version__)
+        self.assertIn("The conversation so far:\nThem: What's the weather forecast?",
+                      client.prompts[0])
+        self.assertEqual(report["rows"][1]["phrase"], "Yes, a little")
+        self.assertEqual(report["rows"][1]["context"], ["Them: Are you hungry?"])
+        self.assertEqual(report["rows"][1]["words_right"], 0.667)
+        self.assertEqual(report["set"], "turk-dialogues test")
+
+    def test_bench_dialogues_file_problems(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = fk.main(["--bank", "", "--model", "x", "bench", "--dialogues",
+                                os.path.join(tmp, "missing.txt")])
+            self.assertEqual(code, 2)
+            self.assertIn("cannot read", err.getvalue())
+            path = write_file(tmp, "turk-dialogues-filtered.txt",
+                              "id\tturn1\tturn2\tturn3\tturn4\tturn5\tturn6\n"
+                              "c5\tIs this the filtered file?\tYes it is\tOh\tOk\tFine\tBye\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code = fk.main(["--bank", "", "--model", "x", "bench", "--dialogues", path])
+            self.assertEqual(code, 2)
+            self.assertIn("no test dialogues", err.getvalue())
 
 
 class ServerTests(unittest.TestCase):

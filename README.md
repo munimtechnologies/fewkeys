@@ -67,6 +67,7 @@ python fewkeys.py --model "" expand pwiat                  # no model: your phra
 python fewkeys.py --model qwen2.5:3b bench                  # measure a model on 40 built-in sentences
 python fewkeys.py --model qwen2.5:3b --plain bench          # the same without the grammar, to compare
 python fewkeys.py --model qwen2.5:3b bench --context        # the same, after the other person's words
+python fewkeys.py --model qwen2.5:3b bench --dialogues turk-dialogues.txt --context   # a public AAC dialogue set
 python fewkeys.py --rounds 1 serve                          # one model call per expansion: faster, less sure
 ```
 
@@ -83,37 +84,56 @@ python fewkeys.py --rounds 1 serve                          # one model call per
 
 `fewkeys bench` takes 40 everyday sentences (`BENCH_PHRASES`) and gives the model only their initials. It reports:
 
-- **top1** and **top5:** how often the intended sentence is the first suggestion, or among the first five.
+- **top1** and **top5:** how often the intended sentence is the first suggestion, or among the first five. Case and punctuation are ignored.
 - **word_accuracy:** for each sentence, the best share of words in the right place among the suggestions, averaged. A near miss ("... up a bit" for "... up a little") still counts 7/8, and in real use the person can fix it by pinning the missing word with a slash.
 - **fitting_per_phrase:** how many suggestions fitted the letters, on average.
 - **mean_seconds:** the average time per expansion.
 - **keystroke_saving:** a hit costs the letters plus one selection. A miss costs the letters plus typing the whole sentence.
 - **constrained:** the share of expansions where Ollama accepted the grammar.
 
-The printed summary also records the model, the number of rounds, and whether the grammar and the conversation context were on. `--json results.json` also saves every sentence and what the model offered for it.
+The printed summary also records the model, the number of rounds, whether the grammar and the conversation context were on, and which sentence set was used. `--json results.json` also saves every sentence and what the model offered for it.
 
-### With conversation context (new in 0.4)
+### With conversation context (0.4)
 
 In real conversations, people mostly answer something that was just said. The SpeakFaster team found that showing the model one previous turn more than doubled exact expansion accuracy (Cai et al., NAACL 2022, https://arxiv.org/abs/2205.03767). `bench --context` measures that effect for your model. Each of the 40 sentences comes with something the other person might have just said (`BENCH_DIALOGUES`), for example "How's the soup?" before "I think it needs more salt". The partner's turn never contains the answer itself.
 
 These partner turns were written for this benchmark, not taken from real conversations. Treat the difference between `bench` and `bench --context` as a rough sign of how much context helps, not a measurement from AAC users.
 
-Your own phrase history isn't included, so real use, where people repeat themselves, should do better than the benchmark.
+### On a public AAC dialogue set (new in 0.5)
+
+Our 40 sentences are our own, so their numbers can't be compared with anyone else's. `bench --dialogues FILE` uses a public set instead: the **Turk Dialogues** by Keith Vertanen (ASSETS 2017), 1,420 six-turn conversations written for AAC research, with train, dev and test splits.
+
+1. Download `turk-dialogues.txt` from https://aactext.org/turk/ (the original file, with the split column; the filtered file has no splits). It is not included here; please cite Vertanen's paper if you publish results.
+2. Run `python fewkeys.py --model qwen2.5:3b bench --dialogues turk-dialogues.txt --context`.
+
+This follows the main abbreviation-expansion test in SpeakFaster (Cai et al., arXiv:2312.01532). Each item is the **second turn** of a **test-split** dialogue, kept if it has at most 10 words and mid-sentence punctuation marks. With `--context`, the model sees the first turn. Only the initials are typed, with no keywords. `--limit` sets how many dialogues are used (default 100, in file order; `--limit 0` for all), because each one takes a few seconds on a laptop CPU.
+
+On that test, SpeakFaster's fine-tuned 64-billion-parameter cloud model put the exact sentence among its top 5 for **72.6% to 76.3%** of turns, drawing 128 samples per abbreviation. The comparison is rough, and here is why:
+
+- SpeakFaster used a corrected version of the dialogues, with typos fixed. The original file keeps them, and a typo makes an exact match impossible.
+- fewkeys uses a small, general model that wasn't trained for this, and asks it only 2 times.
+- With the default `--limit` it uses the first 100 test dialogues, not all of them.
+
+So expect fewkeys to score lower. The gap is what fine-tuning a small model (on the train split) would have to close.
+
+Your own phrase history isn't included in any benchmark, so real use, where people repeat themselves, should do better.
 
 Results so far:
 
-| fewkeys | model | mode | top1 | top5 | keystroke saving | notes |
-|---|---|---|---|---|---|---|
-| 0.1.0 | qwen2.5:3b | plain prompt | 0.0 | 0.0 | (none) | answers were short phrases, not one word per letter |
-| 0.4.0 | qwen2.5:3b | grammar, 2 rounds | | | | to be measured on a laptop CPU |
-| 0.4.0 | qwen2.5:3b | grammar, 2 rounds, context | | | | to be measured on a laptop CPU |
+| fewkeys | model | sentences | mode | top1 | top5 | keystroke saving | notes |
+|---|---|---|---|---|---|---|---|
+| 0.1.0 | qwen2.5:3b | built-in 40 | plain prompt | 0.0 | 0.0 | (none) | answers were short phrases, not one word per letter |
+| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds | | | | to be measured on a laptop CPU |
+| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds, context | | | | to be measured on a laptop CPU |
+| 0.5.0 | qwen2.5:3b | Turk Dialogues test, first 100 | grammar, 2 rounds, context | | | | to be measured; SpeakFaster 64B: top5 0.726 to 0.763 |
 
 ## Status and limits
 
-This is an early prototype (0.4.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
+This is an early prototype (0.5.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
 
 Roadmap:
 - Send the chosen sentence straight into existing AAC software and eye-gaze keyboards. For now the clipboard is the way in. From their public documentation, OptiKey's suggestions come from its built-in engine or Presage, and AsTeRICS Grid's HTTP action sends requests but does not show the reply, so a deeper link needs changes on their side, which we would like to contribute.
+- A small model fine-tuned for abbreviation expansion, trained on public dialogue data such as the Turk Dialogues train split, and measured on the test split.
 - Personal voices: build a Piper voice from a person's banked recordings, offline.
 - An evaluation with AAC users: words per minute and motor actions against their usual setup.
 
