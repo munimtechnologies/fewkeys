@@ -99,7 +99,7 @@ In real conversations, people mostly answer something that was just said. The Sp
 
 These partner turns were written for this benchmark, not taken from real conversations. Treat the difference between `bench` and `bench --context` as a rough sign of how much context helps, not a measurement from AAC users.
 
-### On a public AAC dialogue set (new in 0.5)
+### On a public AAC dialogue set (0.5)
 
 Our 40 sentences are our own, so their numbers can't be compared with anyone else's. `bench --dialogues FILE` uses a public set instead: the **Turk Dialogues** by Keith Vertanen (ASSETS 2017), 1,420 six-turn conversations written for AAC research, with train, dev and test splits.
 
@@ -118,22 +118,41 @@ So expect fewkeys to score lower. The gap is what fine-tuning a small model (on 
 
 Your own phrase history isn't included in any benchmark, so real use, where people repeat themselves, should do better.
 
+### Long benchmark runs and a no-model baseline (`turkbench.py`)
+
+`turkbench.py` runs the same benchmark for long, unattended jobs, for example on a server CPU. It calls `fewkeys.bench` one sentence at a time, so the rows and metrics are the same, and it adds a few things:
+
+- **Saved after every sentence.** It can stop at a time limit (`--max-minutes`, `--deadline`) and still keep every result so far, marked `"complete": false`.
+- **reachable:** the share of target sentences the grammar can write at all. The grammar allows letters, digits and straight apostrophes inside a word, so a target with a hyphen or a curly apostrophe ("well-known", "don’t") can never be matched exactly. **top5_of_reachable** scores only those that can.
+- **by_words:** top-5 accuracy for sentences of 1-3, 4-6 and 7-10 words.
+- **`lookup`:** a baseline with no model at all. Every turn of the train-split dialogues goes into a phrase list. For each test item, it offers the five most frequent listed sentences with the same initials. This shows how much a phrase list alone gets, and **in_train** shows how many test sentences appear word for word in the train split.
+- **`report`:** a Markdown table of every result file in a folder.
+
+```
+python turkbench.py lookup --dialogues turk-dialogues.txt --out lookup.json
+python turkbench.py bench --model qwen2.5:3b --set turk --dialogues turk-dialogues.txt --context --max-minutes 75 --out qwen-turk-context.json
+python turkbench.py bench --model qwen2.5:3b --set builtin --out qwen-builtin.json
+python turkbench.py report --dir . --out results.md
+```
+
 Results so far:
 
 | fewkeys | model | sentences | mode | top1 | top5 | keystroke saving | notes |
 |---|---|---|---|---|---|---|---|
 | 0.1.0 | qwen2.5:3b | built-in 40 | plain prompt | 0.0 | 0.0 | (none) | answers were short phrases, not one word per letter |
-| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds | | | | to be measured on a laptop CPU |
-| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds, context | | | | to be measured on a laptop CPU |
-| 0.5.0 | qwen2.5:3b | Turk Dialogues test, first 100 | grammar, 2 rounds, context | | | | to be measured; SpeakFaster 64B: top5 0.726 to 0.763 |
+| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds | | | | being measured on CPU |
+| 0.5.0 | qwen2.5:3b | built-in 40 | grammar, 2 rounds, context | | | | being measured on CPU |
+| 0.5.0 | qwen2.5:3b | Turk Dialogues test, first 100 | grammar, 2 rounds, context | | | | being measured; SpeakFaster 64B: top5 0.726 to 0.763 |
+| 0.5.0 | llama3.2:3b | Turk Dialogues test, first 100 | grammar, 2 rounds, context | | | | being measured |
+| (none) | train-split lookup | Turk Dialogues test | phrase list only | | | | being measured |
 
 ## Status and limits
 
-This is an early prototype (0.5.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
+This is an early prototype (0.5). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
 
 Roadmap:
 - Send the chosen sentence straight into existing AAC software and eye-gaze keyboards. For now the clipboard is the way in. From their public documentation, OptiKey's suggestions come from its built-in engine or Presage, and AsTeRICS Grid's HTTP action sends requests but does not show the reply, so a deeper link needs changes on their side, which we would like to contribute.
-- A small model fine-tuned for abbreviation expansion, trained on public dialogue data such as the Turk Dialogues train split, and measured on the test split.
+- A small model fine-tuned for abbreviation expansion, trained on public dialogue data whose licence allows it, and measured on the Turk Dialogues test split.
 - Personal voices: build a Piper voice from a person's banked recordings, offline.
 - An evaluation with AAC users: words per minute and motor actions against their usual setup.
 
@@ -142,7 +161,7 @@ If you use AAC, or support someone who does, and want to try fewkeys or tell us 
 ## Development
 
 ```
-python -m unittest test_fewkeys.py
+python -m unittest test_fewkeys.py test_turkbench.py
 ```
 
 Made by MV2 of Munim, Inc. with AI agents. Apache-2.0 license.
