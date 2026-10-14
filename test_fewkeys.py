@@ -21,10 +21,12 @@ class FakeClient:
         self.replies = list(replies)
         self.prompts = []
         self.schemas = []
+        self.temperatures = []
 
     def generate(self, prompt, temperature=0.2, schema=None):
         self.prompts.append(prompt)
         self.schemas.append(schema)
+        self.temperatures.append(temperature)
         return self.replies.pop(0) if self.replies else ""
 
 
@@ -88,6 +90,15 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(fk.matches("Let's watch the game!", "lwtg"))
         self.assertEqual(fk.initials_of("Please wait, I am typing"), "pwiat")
 
+    def test_word_accuracy(self):
+        target = "Can you turn the volume up a little"
+        self.assertEqual(fk.word_accuracy(target, [target.upper() + "."]), 1.0)
+        self.assertEqual(fk.word_accuracy(target, ["Can you turn the volume up a bit"]), 7 / 8)
+        self.assertEqual(fk.word_accuracy("See you soon", ["Sure you sing", "See you Sunday"]),
+                         2 / 3)
+        self.assertEqual(fk.word_accuracy("See you soon", ["See you"]), 0.0)
+        self.assertEqual(fk.word_accuracy("See you soon", []), 0.0)
+
     def test_parse_model_output(self):
         reply = '1. I want water\n2) "Is it wet"\n- Hello there\n\n•  Go now\n'
         self.assertEqual(fk.parse_model_output(reply),
@@ -141,6 +152,12 @@ class ParseTests(unittest.TestCase):
         self.assertIn("one per line", prompt)
         for letters, sentence in fk.EXAMPLES:
             self.assertEqual(fk.initials_of(sentence), letters)
+            self.assertIn("%s -> %s" % (letters, sentence), prompt)
+
+    def test_examples_are_not_bench_phrases(self):
+        bench = {fk.normalize(p) for p in fk.BENCH_PHRASES}
+        for _, sentence in fk.EXAMPLES:
+            self.assertNotIn(fk.normalize(sentence), bench)
 
     def test_build_prompt_with_own_examples_and_json(self):
         ab = fk.parse_abbreviation("pwt")
@@ -191,6 +208,30 @@ class ExpandTests(unittest.TestCase):
         self.assertEqual(client.schemas[0]["properties"]["sentences"]["items"]["pattern"],
                          fk.sentence_pattern("iwsw"))
         self.assertIn('{"sentences": [...]}', client.prompts[0])
+
+    def test_sentences_proposed_in_more_rounds_rank_first(self):
+        client = FakeClient(['{"sentences": ["I wish she would", "I want some water"]}',
+                             '{"sentences": ["Ice was so wet", "I want some water"]}',
+                             '{"sentences": ["I want some water", "I wish she would"]}'])
+        result = fk.expand("iwsw", client=client, use_common=False, rounds=3)
+        self.assertEqual([s["text"] for s in result["suggestions"]],
+                         ["I want some water", "I wish she would", "Ice was so wet"])
+        self.assertEqual(len(client.prompts), 3)
+        self.assertEqual([round(t, 2) for t in client.temperatures], [0.2, 0.7, 1.2])
+
+    def test_a_repeat_within_one_round_is_one_vote(self):
+        client = FakeClient(['{"sentences": ["Ice was so wet", "ice was so wet.", '
+                             '"I want some water"]}',
+                             '{"sentences": ["I want some water", "Ice was so wet"]}'])
+        result = fk.expand("iwsw", client=client, use_common=False)
+        self.assertEqual([s["text"] for s in result["suggestions"]],
+                         ["Ice was so wet", "I want some water"])
+
+    def test_full_list_skips_the_model(self):
+        client = FakeClient(["I am tired"])
+        result = fk.expand("iat", client=client, limit=1)
+        self.assertEqual(result["suggestions"], [{"text": "I am thirsty", "source": "common"}])
+        self.assertEqual(client.prompts, [])
 
     def test_plain_mode_sends_no_schema(self):
         client = FakeClient(["I am tired"])
@@ -262,9 +303,12 @@ class ExpandTests(unittest.TestCase):
         self.assertEqual(summary["phrases"], 2)
         self.assertEqual(summary["top1"], 0.5)
         self.assertEqual(summary["top5"], 0.5)
+        self.assertEqual(summary["word_accuracy"], 0.667)
         self.assertEqual(summary["constrained"], 1.0)
         self.assertEqual(report["rows"][0]["rank"], 1)
+        self.assertEqual(report["rows"][0]["words_right"], 1.0)
         self.assertEqual(report["rows"][1]["suggestions"], ["Sure you sing"])
+        self.assertEqual(report["rows"][1]["words_right"], 0.333)
         self.assertIsNone(report["rows"][1]["rank"])
         self.assertGreater(summary["keystroke_saving"], 0)
 
@@ -281,9 +325,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(fk.main(["--bank", path, "--model", "", "add", "Good", "game"]), 0)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                code = fk.main(["--bank", path, "--model", "", "expand", "gg"])
+                code = fk.main(["--bank", path, "--model", "", "--rounds", "3", "expand", "gg"])
             self.assertEqual(code, 0)
             self.assertIn("1. Good game  [mine]", out.getvalue())
+
+    def test_bench_needs_a_model(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = fk.main(["--bank", "", "--model", "", "bench"])
+        self.assertEqual(code, 2)
+        self.assertIn("needs a model", err.getvalue())
 
 
 class ServerTests(unittest.TestCase):

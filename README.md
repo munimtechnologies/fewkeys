@@ -28,13 +28,17 @@ Suggestions are shown in this order, and each one says where it came from:
 2. **Everyday phrases** ("common"). A short built-in list ("I am too hot", "Please call the nurse", ...), so fewkeys helps from the first minute, even with no model running.
 3. **A local language model** ("suggested"). This uses any small instruction model served by [Ollama](https://ollama.com). fewkeys checks every model guess: a sentence is shown only if it has exactly one word per letter, in order, and contains any word you added after a slash.
 
-### Holding small models to the letters (new in 0.2)
+### Holding small models to the letters (0.2)
 
 Small models are bad at "exactly one word per letter". In our first test on a laptop, a 3B model answered `cwtatl` with things like "could talk later" and "want to walk", and it recovered **none** of the 40 benchmark sentences.
 
-So fewkeys 0.2 doesn't just ask nicely. It sends Ollama a JSON schema whose `pattern` allows only sentences with one word per letter, each starting with that letter (for `iwsw`: `^[iI][A-Za-z0-9']*,? [wW]...$`). Ollama turns that pattern into a grammar, so the model *cannot* write a word that starts with the wrong letter. It still chooses the words, so the sentences are its best guesses.
+So since 0.2, fewkeys doesn't just ask nicely. It sends Ollama a JSON schema whose `pattern` allows only sentences with one word per letter, each starting with that letter (for `iwsw`: `^[iI][A-Za-z0-9']*,? [wW]...$`). Ollama turns that pattern into a grammar, so the model *cannot* write a word that starts with the wrong letter. It still chooses the words, so the sentences are its best guesses.
 
 If your Ollama is too old to take a schema, fewkeys falls back to a plain prompt and filters the answers. Use `--plain` to compare the two.
+
+### Ranking by agreement (new in 0.3)
+
+fewkeys asks the model more than once (`--rounds`, default 2), the second time a little more freely. A sentence the model proposes in more rounds is shown first; ties keep the model's own order. SpeakFaster drew 128 samples per abbreviation from its model (temperature 1.0); a laptop can't afford that, so fewkeys uses a few rounds and trusts the sentences the model agrees with itself on. The model also sees six worked examples now, from three-word requests to eight-word questions.
 
 ## Quick start
 
@@ -62,6 +66,7 @@ python fewkeys.py add "Please put the game on"
 python fewkeys.py --model "" expand pwiat          # no model: your phrases + common phrases only
 python fewkeys.py --model qwen2.5:3b bench          # measure a model on 40 built-in sentences
 python fewkeys.py --model qwen2.5:3b --plain bench  # the same without the grammar, to compare
+python fewkeys.py --rounds 1 serve                  # one model call per expansion: faster, less sure
 ```
 
 `--model auto` (the default) uses the first installed model from a short list of small, fast ones (llama3.2:3b, qwen2.5:3b, gemma3:4b, phi4-mini, ...), or else the smallest model you have.
@@ -78,12 +83,13 @@ python fewkeys.py --model qwen2.5:3b --plain bench  # the same without the gramm
 `fewkeys bench` takes 40 everyday sentences (`BENCH_PHRASES`) and gives the model only their initials. It reports:
 
 - **top1** and **top5:** how often the intended sentence is the first suggestion, or among the first five.
+- **word_accuracy:** for each sentence, the best share of words in the right place among the suggestions, averaged. A near miss ("... up a bit" for "... up a little") still counts 7/8, and in real use the person can fix it by pinning the missing word with a slash.
 - **fitting_per_phrase:** how many suggestions fitted the letters, on average.
 - **mean_seconds:** the average time per expansion.
 - **keystroke_saving:** a hit costs the letters plus one selection. A miss costs the letters plus typing the whole sentence.
 - **constrained:** the share of expansions where Ollama accepted the grammar.
 
-`--json results.json` also saves every sentence and what the model offered for it.
+The printed summary also records the model, the number of rounds and whether the grammar was on. `--json results.json` also saves every sentence and what the model offered for it.
 
 Your own phrase history isn't included, so real use, where people repeat themselves, should do better than the benchmark.
 
@@ -92,11 +98,11 @@ Results so far:
 | fewkeys | model | mode | top1 | top5 | keystroke saving | notes |
 |---|---|---|---|---|---|---|
 | 0.1.0 | qwen2.5:3b | plain prompt | 0.0 | 0.0 | (none) | answers were short phrases, not one word per letter |
-| 0.2.0 | | grammar | | | | to be measured |
+| 0.3.0 | qwen2.5:3b | grammar, 2 rounds | | | | to be measured on a laptop CPU |
 
 ## Status and limits
 
-This is an early prototype (0.2.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
+This is an early prototype (0.3.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
 
 Roadmap:
 - Send the chosen sentence straight into existing AAC software and eye-gaze keyboards (OptiKey, Grid, Windows Eye Control), not just through the clipboard.

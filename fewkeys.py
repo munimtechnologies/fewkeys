@@ -9,7 +9,8 @@ running, a local language model served by Ollama. Nothing leaves the machine.
 The idea follows Google's SpeakFaster study (Cai et al., Nature Communications
 2024), which used a cloud model; fewkeys does the same with small open models
 on an ordinary laptop. Small models rarely keep to "one word per letter" on
-their own, so fewkeys holds them to the letters with a JSON-schema grammar.
+their own, so fewkeys holds them to the letters with a JSON-schema grammar, and
+ranks the sentences the model proposes again and again first.
 Standard library only. MIT licensed.
 Made by MV2 of Munim, Inc. with AI agents.
 """
@@ -28,10 +29,11 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 DEFAULT_MODEL = "auto"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
+DEFAULT_ROUNDS = 2
 MAX_BODY = 64 * 1024
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
@@ -103,11 +105,15 @@ CORE_PHRASES = (
     "Good night",
 )
 
-# Few-shot examples for the model prompt.
+# Few-shot examples for the model prompt: short and long, statements and
+# questions, so small models see the shape of the task.
 EXAMPLES = (
     ("iwsw", "I want some water"),
     ("cyctd", "Can you call the doctor"),
     ("tfc", "Thanks for coming"),
+    ("mbh", "My back hurts"),
+    ("wifdt", "What is for dinner tonight"),
+    ("dywtgfaw", "Do you want to go for a walk"),
 )
 
 # Conversational sentences for `fewkeys bench`, kept apart from CORE_PHRASES
@@ -200,6 +206,21 @@ def matches(phrase, abbrev):
             return False
     lowered = [w.lower() for w in ws]
     return all(any(w.startswith(k) for w in lowered) for k in abbrev.keywords)
+
+
+def word_accuracy(target, suggestions):
+    """The best share of words in the right place among the suggestions, 0 to 1.
+
+    A near miss such as "Can you turn the volume up a bit" for "... a little"
+    scores 7/8: the person can pin the missing word with a slash and try again.
+    """
+    want = normalize(target).split()
+    best = 0.0
+    for suggestion in suggestions:
+        got = normalize(suggestion).split()
+        if want and len(got) == len(want):
+            best = max(best, sum(1 for a, b in zip(want, got) if a == b) / len(want))
+    return best
 
 
 def sentence_pattern(initials):
@@ -315,9 +336,9 @@ def build_prompt(abbrev, context=(), n=5, examples=(), as_json=False):
         lines.append("Use these words (or words starting with them): " + ", ".join(abbrev.keywords))
     if as_json:
         lines.append('Answer in JSON as {"sentences": [...]} with up to %d different '
-                     "possible sentences." % n)
+                     "possible sentences, most likely first." % n)
     else:
-        lines.append("Write %d different possible sentences, one per line, "
+        lines.append("Write %d different possible sentences, most likely first, one per line, "
                      "with no numbers and nothing else." % n)
     return "\n".join(lines)
 
@@ -422,14 +443,17 @@ class PhraseBank:
         os.replace(tmp, self.path)
 
 
-def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_common=True,
-           constrain=True):
+def expand(text, context=(), bank=None, client=None, limit=8, rounds=DEFAULT_ROUNDS,
+           use_common=True, constrain=True):
     """Return sentences that fit the typed letters, best first.
 
     Order: the person's own phrases, then everyday phrases, then model
-    guesses. Model guesses that do not fit the letters are dropped. With
-    constrain, the model is held to the letters by a grammar; an Ollama that
-    refuses the grammar is asked again in plain text.
+    guesses. The model is asked `rounds` times, each time a little more
+    freely; a sentence it proposes in more rounds ranks higher (a cheap
+    stand-in for the 128 samples per abbreviation SpeakFaster drew). Model
+    guesses that do not fit the letters are dropped. With constrain, the
+    model is held to the letters by a grammar; an Ollama that refuses the
+    grammar is asked again in plain text.
     """
     abbrev = parse_abbreviation(text)
     out, seen = [], set()
@@ -449,11 +473,12 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_comm
                 take(phrase, "common")
     error = None
     constrained = False
-    if client is not None:
+    if client is not None and len(out) < limit:
         examples = bank.examples() if bank is not None else ()
         schema = sentence_schema(abbrev) if constrain else None
+        votes = {}  # normalized sentence -> {"text", "rounds", "best"}, in first-seen order
         r = 0
-        while r < rounds and len(out) < limit:
+        while r < rounds:
             prompt = build_prompt(abbrev, context, examples=examples, as_json=schema is not None)
             try:
                 reply = client.generate(prompt, temperature=0.2 + 0.5 * r, schema=schema)
@@ -472,34 +497,45 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=2, use_comm
                 candidates = parse_json_sentences(reply)
             else:
                 candidates = parse_model_output(reply, abbrev.initials)
+            this_round = []
             for candidate in candidates:
-                if matches(candidate, abbrev):
-                    take(candidate, "model")
+                key = normalize(candidate)
+                if key not in this_round and matches(candidate, abbrev):
+                    this_round.append(key)
+                    vote = votes.setdefault(key, {"text": candidate, "rounds": 0,
+                                                  "best": len(this_round) - 1})
+                    vote["rounds"] += 1
+                    vote["best"] = min(vote["best"], len(this_round) - 1)
             r += 1
+        # sorted() is stable, so ties keep the order the model first gave them.
+        for vote in sorted(votes.values(), key=lambda v: (-v["rounds"], v["best"])):
+            take(vote["text"], "model")
     return {"abbreviation": abbrev.initials, "keywords": list(abbrev.keywords),
             "suggestions": out, "model_error": error, "constrained": constrained}
 
 
-def bench(phrases, client, limit=5, rounds=2, constrain=True):
+def bench(phrases, client, limit=5, rounds=DEFAULT_ROUNDS, constrain=True):
     """Measure how often the model recovers a sentence from its initials alone.
 
     Keystroke saving counts the letters plus one selection for a hit, and the
     letters plus typing the whole sentence for a miss.
     """
-    rows = []
+    rows, accuracies = [], []
     for phrase in phrases:
         letters = initials_of(phrase)
         start = time.monotonic()
         result = expand(letters, (), bank=None, client=client, limit=limit,
                         rounds=rounds, use_common=False, constrain=constrain)
         seconds = time.monotonic() - start
-        texts = [normalize(s["text"]) for s in result["suggestions"]]
+        suggestions = [s["text"] for s in result["suggestions"]]
+        texts = [normalize(s) for s in suggestions]
         target = normalize(phrase)
         rank = texts.index(target) + 1 if target in texts else None
+        accuracies.append(word_accuracy(phrase, suggestions))
         rows.append({"phrase": phrase, "letters": letters, "rank": rank,
+                     "words_right": round(accuracies[-1], 3),
                      "seconds": round(seconds, 2), "error": result["model_error"],
-                     "constrained": result["constrained"],
-                     "suggestions": [s["text"] for s in result["suggestions"]]})
+                     "constrained": result["constrained"], "suggestions": suggestions})
     n = len(rows) or 1
     full = sum(len(r["phrase"]) for r in rows)
     keys = sum(len(r["letters"]) + (1 if r["rank"] else len(r["phrase"])) for r in rows)
@@ -507,6 +543,7 @@ def bench(phrases, client, limit=5, rounds=2, constrain=True):
         "phrases": len(rows),
         "top1": round(sum(1 for r in rows if r["rank"] == 1) / n, 3),
         "top5": round(sum(1 for r in rows if r["rank"]) / n, 3),
+        "word_accuracy": round(sum(accuracies) / n, 3),
         "fitting_per_phrase": round(sum(len(r["suggestions"]) for r in rows) / n, 2),
         "mean_seconds": round(sum(r["seconds"] for r in rows) / n, 2),
         "keystroke_saving": round(1 - keys / full, 3) if full else 0.0,
@@ -538,19 +575,20 @@ class Piper:
 
 class App:
     def __init__(self, bank, client=None, piper=None, limit=8, allow_any_host=False,
-                 constrain=True):
+                 constrain=True, rounds=DEFAULT_ROUNDS):
         self.bank = bank
         self.client = client
         self.piper = piper
         self.limit = limit
         self.allow_any_host = allow_any_host
         self.constrain = constrain
+        self.rounds = rounds
         self.lock = threading.Lock()
 
     def expand(self, text, context):
         with self.lock:
             return expand(text, context, bank=self.bank, client=self.client, limit=self.limit,
-                          constrain=self.constrain)
+                          rounds=self.rounds, constrain=self.constrain)
 
     def said(self, text):
         with self.lock:
@@ -791,6 +829,9 @@ def main(argv=None):
     p.add_argument("--ollama", default=DEFAULT_OLLAMA, help="Ollama server URL")
     p.add_argument("--plain", action="store_true",
                    help="do not hold the model to the letters with a grammar")
+    p.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS,
+                   help="model calls per expansion (default %(default)s); sentences the "
+                        "model proposes in more calls rank higher")
     p.add_argument("--version", action="version", version="fewkeys " + __version__)
     sub = p.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("expand", help="print sentences for some letters")
@@ -811,6 +852,7 @@ def main(argv=None):
     bank = PhraseBank(args.bank)
     client = OllamaClient(args.ollama, args.model) if args.model else None
     constrain = not args.plain
+    rounds = max(1, args.rounds)
 
     if args.cmd == "add":
         bank.add(" ".join(args.phrase))
@@ -819,7 +861,7 @@ def main(argv=None):
     if args.cmd == "expand":
         try:
             result = expand(args.letters, args.context, bank=bank, client=client,
-                            constrain=constrain)
+                            rounds=rounds, constrain=constrain)
         except ValueError as err:
             print("fewkeys: %s" % err, file=sys.stderr)
             return 2
@@ -832,8 +874,9 @@ def main(argv=None):
         if client is None:
             print("fewkeys: bench needs a model (--model)", file=sys.stderr)
             return 2
-        report = bench(BENCH_PHRASES, client, constrain=constrain)
-        info = {"model": client.model, "fewkeys": __version__}
+        report = bench(BENCH_PHRASES, client, rounds=rounds, constrain=constrain)
+        info = {"model": client.model, "fewkeys": __version__, "rounds": rounds,
+                "grammar": constrain}
         print(json.dumps(dict(report["summary"], **info), indent=1))
         if args.json:
             with open(args.json, "w", encoding="utf-8") as f:
@@ -841,7 +884,8 @@ def main(argv=None):
         return 0
     piper = Piper(args.piper_model, args.piper) if args.piper_model else None
     loopback = args.host in ("127.0.0.1", "localhost", "::1")
-    app = App(bank, client, piper, allow_any_host=not loopback, constrain=constrain)
+    app = App(bank, client, piper, allow_any_host=not loopback, constrain=constrain,
+              rounds=rounds)
     try:
         server = make_server(app, args.host, args.port)
     except OSError as err:
