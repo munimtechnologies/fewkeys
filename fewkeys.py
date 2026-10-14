@@ -29,11 +29,13 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_MODEL = "auto"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 DEFAULT_ROUNDS = 2
+DEFAULT_PORT = 8765
+PORT_TRIES = 10
 MAX_BODY = 64 * 1024
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
@@ -116,50 +118,53 @@ EXAMPLES = (
     ("dywtgfaw", "Do you want to go for a walk"),
 )
 
-# Conversational sentences for `fewkeys bench`, kept apart from CORE_PHRASES
-# so the benchmark measures the model, not the built-in list.
-BENCH_PHRASES = (
-    "Can you turn the volume up a little",
-    "I would like to go outside today",
-    "What time is the appointment tomorrow",
-    "Did you remember to feed the dog",
-    "Please put my glasses on",
-    "I want to watch the news",
-    "Who won the game last night",
-    "Tell her I said hello",
-    "My left foot is cold",
-    "Can we talk about this later",
-    "I had a good day today",
-    "Please close the curtains",
-    "When are the kids coming over",
-    "I need my medicine now",
-    "That was a great movie",
-    "Could you call my sister",
-    "I am worried about the bills",
-    "Let's order pizza tonight",
-    "Put on some music please",
-    "The light is too bright",
-    "How long will you be gone",
-    "I miss going to work",
-    "Can you read me the email",
-    "Please check the battery on my chair",
-    "I would rather stay home",
-    "Thank you for being so patient",
-    "Is it raining outside",
-    "Move my arm a little higher",
-    "I want to sit by the window",
-    "What did the doctor say",
-    "Please do not rush me",
-    "I am happy you came",
-    "Can I have some ice cream",
-    "Turn the fan off please",
-    "We should plan a trip",
-    "Remind me to call mom",
-    "I think it needs more salt",
-    "Where did you put my phone",
-    "Ask them to wait outside",
-    "I feel much better today",
+# Conversational sentences for `fewkeys bench`, each after something the other
+# person might just have said (used with `bench --context`). Kept apart from
+# CORE_PHRASES so the benchmark measures the model, not the built-in list. The
+# partner turns were written for this benchmark, not taken from real talk.
+BENCH_DIALOGUES = (
+    ("Can you hear the TV okay?", "Can you turn the volume up a little"),
+    ("It's sunny out. Any plans?", "I would like to go outside today"),
+    ("Don't forget you see Dr. Lee tomorrow.", "What time is the appointment tomorrow"),
+    ("I'm back from the store.", "Did you remember to feed the dog"),
+    ("Here's the newspaper you wanted.", "Please put my glasses on"),
+    ("What should we put on TV?", "I want to watch the news"),
+    ("Your brother was shouting at the TV all evening.", "Who won the game last night"),
+    ("I'm going to see Aunt Ruth this afternoon.", "Tell her I said hello"),
+    ("Are you comfortable?", "My left foot is cold"),
+    ("We need to decide about the house.", "Can we talk about this later"),
+    ("How was your day?", "I had a good day today"),
+    ("The sun is right in your eyes.", "Please close the curtains"),
+    ("I spoke to Sarah this morning.", "When are the kids coming over"),
+    ("Is the pain back?", "I need my medicine now"),
+    ("So, what did you think?", "That was a great movie"),
+    ("Is there anyone you'd like to talk to?", "Could you call my sister"),
+    ("You seem quiet. What's on your mind?", "I am worried about the bills"),
+    ("I don't feel like cooking.", "Let's order pizza tonight"),
+    ("It's so quiet in here.", "Put on some music please"),
+    ("Why are you squinting?", "The light is too bright"),
+    ("I have to run to the pharmacy.", "How long will you be gone"),
+    ("Mark from the office sent a card.", "I miss going to work"),
+    ("You got an email from your cousin.", "Can you read me the email"),
+    ("The chair seems slow today.", "Please check the battery on my chair"),
+    ("Do you want to come to the party tonight?", "I would rather stay home"),
+    ("Take your time, I'm not going anywhere.", "Thank you for being so patient"),
+    ("I'm going to hang the washing out.", "Is it raining outside"),
+    ("How does that feel?", "Move my arm a little higher"),
+    ("Where would you like to sit?", "I want to sit by the window"),
+    ("I just got off the phone with the clinic.", "What did the doctor say"),
+    ("Come on, we're going to be late.", "Please do not rush me"),
+    ("Sorry it took me so long to visit.", "I am happy you came"),
+    ("Do you want anything for dessert?", "Can I have some ice cream"),
+    ("It's getting chilly in here.", "Turn the fan off please"),
+    ("The kids are off school in the spring.", "We should plan a trip"),
+    ("Anything I should remember for tomorrow?", "Remind me to call mom"),
+    ("How's the soup?", "I think it needs more salt"),
+    ("Are you looking for something?", "Where did you put my phone"),
+    ("The neighbors are at the door.", "Ask them to wait outside"),
+    ("How are you feeling this morning?", "I feel much better today"),
 )
+BENCH_PHRASES = tuple(reply for _, reply in BENCH_DIALOGUES)
 
 
 class ModelError(ValueError):
@@ -514,17 +519,20 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=DEFAULT_ROU
             "suggestions": out, "model_error": error, "constrained": constrained}
 
 
-def bench(phrases, client, limit=5, rounds=DEFAULT_ROUNDS, constrain=True):
+def bench(phrases, client, limit=5, rounds=DEFAULT_ROUNDS, constrain=True, contexts=None):
     """Measure how often the model recovers a sentence from its initials alone.
 
-    Keystroke saving counts the letters plus one selection for a hit, and the
-    letters plus typing the whole sentence for a miss.
+    contexts, if given, holds the conversation turns the model sees before
+    each phrase, in the same order. Keystroke saving counts the letters plus
+    one selection for a hit, and the letters plus typing the whole sentence
+    for a miss.
     """
     rows, accuracies = [], []
-    for phrase in phrases:
+    for i, phrase in enumerate(phrases):
         letters = initials_of(phrase)
+        context = list(contexts[i]) if contexts else []
         start = time.monotonic()
-        result = expand(letters, (), bank=None, client=client, limit=limit,
+        result = expand(letters, context, bank=None, client=client, limit=limit,
                         rounds=rounds, use_common=False, constrain=constrain)
         seconds = time.monotonic() - start
         suggestions = [s["text"] for s in result["suggestions"]]
@@ -532,7 +540,7 @@ def bench(phrases, client, limit=5, rounds=DEFAULT_ROUNDS, constrain=True):
         target = normalize(phrase)
         rank = texts.index(target) + 1 if target in texts else None
         accuracies.append(word_accuracy(phrase, suggestions))
-        rows.append({"phrase": phrase, "letters": letters, "rank": rank,
+        rows.append({"phrase": phrase, "letters": letters, "context": context, "rank": rank,
                      "words_right": round(accuracies[-1], 3),
                      "seconds": round(seconds, 2), "error": result["model_error"],
                      "constrained": result["constrained"], "suggestions": suggestions})
@@ -687,9 +695,20 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = os.name != "nt"
 
 
-def make_server(app, host="127.0.0.1", port=8765):
+def make_server(app, host="127.0.0.1", port=DEFAULT_PORT):
     handler = type("FewkeysHandler", (_Handler,), {"app": app})
     return _Server((host, port), handler)
+
+
+def make_server_near(app, host="127.0.0.1", port=DEFAULT_PORT, tries=PORT_TRIES):
+    """Listen on port, or on the first free one of the next few ports."""
+    error = None
+    for p in range(port, port + tries if port else 1):
+        try:
+            return make_server(app, host, p)
+        except (OSError, OverflowError) as e:
+            error = e
+    raise error
 
 
 PAGE = """<!doctype html>
@@ -840,13 +859,17 @@ def main(argv=None):
                    help='a conversation turn such as "Them: where were you?" (repeatable)')
     s = sub.add_parser("serve", help="run the local web page")
     s.add_argument("--host", default="127.0.0.1")
-    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--port", type=int, default=DEFAULT_PORT,
+                   help="port to listen on (default %(default)s); if it is busy, "
+                        "fewkeys uses the next free port")
     s.add_argument("--piper-model", help="Piper .onnx voice to speak with (default: browser voice)")
     s.add_argument("--piper", default="piper", help="path to the piper program")
     a = sub.add_parser("add", help="add a phrase to the history")
     a.add_argument("phrase", nargs="+")
     b = sub.add_parser("bench", help="measure the model on built-in sentences")
     b.add_argument("--json", help="also write full results to this file")
+    b.add_argument("--context", action="store_true",
+                   help="show the model what the other person just said before each sentence")
     args = p.parse_args(argv)
 
     bank = PhraseBank(args.bank)
@@ -874,9 +897,11 @@ def main(argv=None):
         if client is None:
             print("fewkeys: bench needs a model (--model)", file=sys.stderr)
             return 2
-        report = bench(BENCH_PHRASES, client, rounds=rounds, constrain=constrain)
+        contexts = [["Them: " + turn] for turn, _ in BENCH_DIALOGUES] if args.context else None
+        report = bench(BENCH_PHRASES, client, rounds=rounds, constrain=constrain,
+                       contexts=contexts)
         info = {"model": client.model, "fewkeys": __version__, "rounds": rounds,
-                "grammar": constrain}
+                "grammar": constrain, "context": args.context}
         print(json.dumps(dict(report["summary"], **info), indent=1))
         if args.json:
             with open(args.json, "w", encoding="utf-8") as f:
@@ -887,13 +912,16 @@ def main(argv=None):
     app = App(bank, client, piper, allow_any_host=not loopback, constrain=constrain,
               rounds=rounds)
     try:
-        server = make_server(app, args.host, args.port)
-    except OSError as err:
-        print("fewkeys: cannot listen on port %d (%s); try --port %d"
-              % (args.port, err, args.port + 1), file=sys.stderr)
+        server = make_server_near(app, args.host, args.port)
+    except (OSError, OverflowError) as err:
+        print("fewkeys: cannot listen on port %d or the %d after it (%s); try another --port"
+              % (args.port, PORT_TRIES - 1, err), file=sys.stderr)
         return 2
+    port = server.server_address[1]
+    if args.port and port != args.port:
+        print("fewkeys: port %d is busy, so using %d" % (args.port, port))
     print("fewkeys %s is running on http://%s:%d/  (Ctrl+C to stop)"
-          % (__version__, "localhost" if loopback else args.host, server.server_address[1]))
+          % (__version__, "localhost" if loopback else args.host, port))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

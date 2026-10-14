@@ -159,6 +159,15 @@ class ParseTests(unittest.TestCase):
         for _, sentence in fk.EXAMPLES:
             self.assertNotIn(fk.normalize(sentence), bench)
 
+    def test_bench_dialogues(self):
+        self.assertEqual(len(fk.BENCH_DIALOGUES), 40)
+        self.assertEqual(fk.BENCH_PHRASES, tuple(reply for _, reply in fk.BENCH_DIALOGUES))
+        self.assertEqual(len({fk.normalize(p) for p in fk.BENCH_PHRASES}), 40)
+        for turn, reply in fk.BENCH_DIALOGUES:
+            # The other person's words never give the whole answer away.
+            self.assertNotIn(fk.normalize(reply), fk.normalize(turn))
+            self.assertFalse(turn.startswith("Them:"), turn)
+
     def test_build_prompt_with_own_examples_and_json(self):
         ab = fk.parse_abbreviation("pwt")
         prompt = fk.build_prompt(ab, examples=[("ptko", "Put the kettle on")], as_json=True)
@@ -307,10 +316,20 @@ class ExpandTests(unittest.TestCase):
         self.assertEqual(summary["constrained"], 1.0)
         self.assertEqual(report["rows"][0]["rank"], 1)
         self.assertEqual(report["rows"][0]["words_right"], 1.0)
+        self.assertEqual(report["rows"][0]["context"], [])
         self.assertEqual(report["rows"][1]["suggestions"], ["Sure you sing"])
         self.assertEqual(report["rows"][1]["words_right"], 0.333)
         self.assertIsNone(report["rows"][1]["rank"])
         self.assertGreater(summary["keystroke_saving"], 0)
+
+    def test_bench_with_context(self):
+        client = FakeClient(['{"sentences": ["I am going out"]}'])
+        report = fk.bench(["I am going out"], client, rounds=1,
+                          contexts=[["Them: Where are you off to?"]])
+        self.assertIn("The conversation so far:\nThem: Where are you off to?", client.prompts[0])
+        self.assertEqual(report["rows"][0]["context"], ["Them: Where are you off to?"])
+        self.assertEqual(report["rows"][0]["rank"], 1)
+        self.assertEqual(report["summary"]["top1"], 1.0)
 
     def test_bench_phrases_are_not_core_phrases(self):
         core = {fk.normalize(p) for p in fk.CORE_PHRASES}
@@ -332,7 +351,7 @@ class CliTests(unittest.TestCase):
     def test_bench_needs_a_model(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            code = fk.main(["--bank", "", "--model", "", "bench"])
+            code = fk.main(["--bank", "", "--model", "", "bench", "--context"])
         self.assertEqual(code, 2)
         self.assertIn("needs a model", err.getvalue())
 
@@ -381,6 +400,20 @@ class ServerTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_busy_port_moves_to_a_later_one(self):
+        app = fk.App(fk.PhraseBank())
+        first = fk.make_server(app, "127.0.0.1", 0)
+        try:
+            port = first.server_address[1]
+            second = fk.make_server_near(app, "127.0.0.1", port)
+            try:
+                self.assertGreater(second.server_address[1], port)
+                self.assertLess(second.server_address[1], port + fk.PORT_TRIES)
+            finally:
+                second.server_close()
+        finally:
+            first.server_close()
 
 
 if __name__ == "__main__":

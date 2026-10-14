@@ -36,9 +36,9 @@ So since 0.2, fewkeys doesn't just ask nicely. It sends Ollama a JSON schema who
 
 If your Ollama is too old to take a schema, fewkeys falls back to a plain prompt and filters the answers. Use `--plain` to compare the two.
 
-### Ranking by agreement (new in 0.3)
+### Ranking by agreement (0.3)
 
-fewkeys asks the model more than once (`--rounds`, default 2), the second time a little more freely. A sentence the model proposes in more rounds is shown first; ties keep the model's own order. SpeakFaster drew 128 samples per abbreviation from its model (temperature 1.0); a laptop can't afford that, so fewkeys uses a few rounds and trusts the sentences the model agrees with itself on. The model also sees six worked examples now, from three-word requests to eight-word questions.
+fewkeys asks the model more than once (`--rounds`, default 2), the second time a little more freely. A sentence the model proposes in more rounds is shown first; ties keep the model's own order. SpeakFaster drew 128 samples per abbreviation from its model (temperature 1.0); a laptop can't afford that, so fewkeys uses a few rounds and trusts the sentences the model agrees with itself on. The model also sees six worked examples, from three-word requests to eight-word questions.
 
 ## Quick start
 
@@ -49,7 +49,7 @@ ollama pull llama3.2:3b
 python fewkeys.py serve
 ```
 
-Open http://localhost:8765/ in your browser. Type your letters, press Enter, and choose a sentence. The browser speaks it aloud. Tick "Also copy the sentence I choose" to paste it into your AAC software, email or chat.
+Open http://localhost:8765/ in your browser. If port 8765 is already taken by another program, fewkeys uses the next free port and prints the address to open. Type your letters, press Enter, and choose a sentence. The browser speaks it aloud. Tick "Also copy the sentence I choose" to paste it into your AAC software, email or chat.
 
 To use your own offline [Piper](https://github.com/rhasspy/piper) voice instead of the browser's voice:
 
@@ -63,10 +63,11 @@ From the command line:
 python fewkeys.py expand iwsw
 python fewkeys.py expand ishpitb/bedroom --context "Them: Where did you see him?"
 python fewkeys.py add "Please put the game on"
-python fewkeys.py --model "" expand pwiat          # no model: your phrases + common phrases only
-python fewkeys.py --model qwen2.5:3b bench          # measure a model on 40 built-in sentences
-python fewkeys.py --model qwen2.5:3b --plain bench  # the same without the grammar, to compare
-python fewkeys.py --rounds 1 serve                  # one model call per expansion: faster, less sure
+python fewkeys.py --model "" expand pwiat                  # no model: your phrases + common phrases only
+python fewkeys.py --model qwen2.5:3b bench                  # measure a model on 40 built-in sentences
+python fewkeys.py --model qwen2.5:3b --plain bench          # the same without the grammar, to compare
+python fewkeys.py --model qwen2.5:3b bench --context        # the same, after the other person's words
+python fewkeys.py --rounds 1 serve                          # one model call per expansion: faster, less sure
 ```
 
 `--model auto` (the default) uses the first installed model from a short list of small, fast ones (llama3.2:3b, qwen2.5:3b, gemma3:4b, phi4-mini, ...), or else the smallest model you have.
@@ -89,7 +90,13 @@ python fewkeys.py --rounds 1 serve                  # one model call per expansi
 - **keystroke_saving:** a hit costs the letters plus one selection. A miss costs the letters plus typing the whole sentence.
 - **constrained:** the share of expansions where Ollama accepted the grammar.
 
-The printed summary also records the model, the number of rounds and whether the grammar was on. `--json results.json` also saves every sentence and what the model offered for it.
+The printed summary also records the model, the number of rounds, and whether the grammar and the conversation context were on. `--json results.json` also saves every sentence and what the model offered for it.
+
+### With conversation context (new in 0.4)
+
+In real conversations, people mostly answer something that was just said. The SpeakFaster team found that showing the model one previous turn more than doubled exact expansion accuracy (Cai et al., NAACL 2022, https://arxiv.org/abs/2205.03767). `bench --context` measures that effect for your model. Each of the 40 sentences comes with something the other person might have just said (`BENCH_DIALOGUES`), for example "How's the soup?" before "I think it needs more salt". The partner's turn never contains the answer itself.
+
+These partner turns were written for this benchmark, not taken from real conversations. Treat the difference between `bench` and `bench --context` as a rough sign of how much context helps, not a measurement from AAC users.
 
 Your own phrase history isn't included, so real use, where people repeat themselves, should do better than the benchmark.
 
@@ -98,14 +105,15 @@ Results so far:
 | fewkeys | model | mode | top1 | top5 | keystroke saving | notes |
 |---|---|---|---|---|---|---|
 | 0.1.0 | qwen2.5:3b | plain prompt | 0.0 | 0.0 | (none) | answers were short phrases, not one word per letter |
-| 0.3.0 | qwen2.5:3b | grammar, 2 rounds | | | | to be measured on a laptop CPU |
+| 0.4.0 | qwen2.5:3b | grammar, 2 rounds | | | | to be measured on a laptop CPU |
+| 0.4.0 | qwen2.5:3b | grammar, 2 rounds, context | | | | to be measured on a laptop CPU |
 
 ## Status and limits
 
-This is an early prototype (0.3.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
+This is an early prototype (0.4.0). It has **not yet been tested with people who use AAC**. That testing is the next step, and it should be done with speech-language pathologists and people living with ALS. fewkeys is not a medical device and is not a replacement for a person's AAC system. It is meant to sit alongside one.
 
 Roadmap:
-- Send the chosen sentence straight into existing AAC software and eye-gaze keyboards (OptiKey, Grid, Windows Eye Control), not just through the clipboard.
+- Send the chosen sentence straight into existing AAC software and eye-gaze keyboards. For now the clipboard is the way in. From their public documentation, OptiKey's suggestions come from its built-in engine or Presage, and AsTeRICS Grid's HTTP action sends requests but does not show the reply, so a deeper link needs changes on their side, which we would like to contribute.
 - Personal voices: build a Piper voice from a person's banked recordings, offline.
 - An evaluation with AAC users: words per minute and motor actions against their usual setup.
 
