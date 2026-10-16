@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 DEFAULT_MODEL = "auto"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
@@ -465,8 +465,8 @@ def expand(text, context=(), bank=None, client=None, limit=8, rounds=DEFAULT_ROU
     Order: the person's own phrases, then everyday phrases, then model
     guesses. The model is asked `rounds` times, each time a little more
     freely; a sentence it proposes in more rounds ranks higher (a cheap
-    stand-in for the 128 samples per abbreviation SpeakFaster drew). Model
-    guesses that do not fit the letters are dropped. With constrain, the
+    stand-in for the 128 to 256 samples per abbreviation SpeakFaster drew).
+    Model guesses that do not fit the letters are dropped. With constrain, the
     model is held to the letters by a grammar; an Ollama that refuses the
     grammar is asked again in plain text.
     """
