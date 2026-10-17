@@ -1,0 +1,13 @@
+{
+ "source": "items-changed.json of job fewkeys-tdc-bench-v1 (2026-10-16); the sentences themselves are not copied here",
+ "first_100": {
+  "items": 100,
+  "changed": 7,
+  "reply_changed": 3,
+  "partner_turn_changed": 4
+ },
+ "all_short_test_turns": {
+  "items": 225,
+  "changed": 11
+ }
+}

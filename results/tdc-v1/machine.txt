@@ -1,0 +1,10 @@
+nproc: 16
+model name	: AMD Ryzen 9 5900HX with Radeon Graphics
+MemTotal:       11214928 kB
+{"version":"0.40.5"}
+7bd80a8a8fe1e3ee91158072b4adc198db691f96196b27acf28ea8335507dafb  /data/turk-dialogues.txt
+41ef3df57757c98bf630a153e338676e31f20920b58235de4d8408864f3de2ae  /data/turk_dialogues_corrections.txt
+eb9d5eee6f9aeee2cdaf6288be8a3d705e2ae81662089c2f3282bb496cfbd2a4  /out/turk-dialogues-corrected.txt
+4bed0da6f310476a2c98faca9fb6a074184b8c82e8efa459f146cec63eec2d15  fewkeys.py
+67c82dc16199a75ab83e79aa69fd0b5ff4d9c7cc40af71380fbce9c8f425fc76  turkbench.py
+71339eda567a149e373869777dd76fede68114e24b987690b78ff721d2a4d2fd  correct_turk.py

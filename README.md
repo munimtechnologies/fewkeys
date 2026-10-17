@@ -110,7 +110,7 @@ This follows the main abbreviation-expansion test in SpeakFaster (Cai et al., ar
 
 On that test, SpeakFaster's fine-tuned 64-billion-parameter cloud model put the exact sentence among its top 5 for **72.6% to 76.3%** of turns, drawing 128 to 256 samples per abbreviation. The comparison is rough, and here is why:
 
-- SpeakFaster used a corrected version of the dialogues, with typos fixed. The original file keeps them, and a typo makes an exact match impossible. The corrections are public in the SpeakFaster repository (TeamGleason/SpeakFaster, `data/naacl_2022_suppl_data/turk_dialogues_corrections.txt`); fewkeys does not apply them yet.
+- SpeakFaster used a corrected version of the dialogues, with typos fixed. The original file keeps them, and a typo makes an exact match impossible. The corrections are public in the SpeakFaster repository (TeamGleason/SpeakFaster, `data/naacl_2022_suppl_data/turk_dialogues_corrections.txt`). `correct_turk.py` applies them (see below), and the results table has runs on both texts.
 - fewkeys uses a small, general model that wasn't trained for this, and asks it only 2 times.
 - With the default `--limit` it uses the first 100 test dialogues, not all of them.
 
@@ -128,14 +128,17 @@ Your own phrase history isn't included in any benchmark, so real use, where peop
 - **`lookup`:** a baseline with no model at all. Every turn of the train-split dialogues goes into a phrase list. For each test item, it offers the five most frequent listed sentences with the same initials. This shows how much a phrase list alone gets, and **in_train** shows how many test sentences appear word for word in the train split.
 - **`report`:** a Markdown table of every result file in a folder.
 
+`correct_turk.py` (no model, standard library) applies the published corrections to the Turk Dialogues, giving the corrected text (Turk Dialogues Corrected) that the published figures use. Each correction line names a split, a dialogue and one or more `s/old/new/` fixes; a fix whose text or split does not match is left out and listed in the report, so nothing changes silently. The corrections file is downloaded, not included here.
+
 ```
+python correct_turk.py turk-dialogues.txt turk_dialogues_corrections.txt turk-dialogues-corrected.txt --report tdc-report.json
 python turkbench.py lookup --dialogues turk-dialogues.txt --out lookup.json
 python turkbench.py bench --model qwen2.5:3b --set turk --dialogues turk-dialogues.txt --context --max-minutes 75 --out qwen-turk-context.json
 python turkbench.py bench --model qwen2.5:3b --set builtin --out qwen-builtin.json
 python turkbench.py report --dir . --out results.md
 ```
 
-Results so far. The 0.5.0 rows come from one CPU-only run on 2026-10-15 (Ollama 0.40.4 in a container limited to 2 cores of an AMD Ryzen 9 5900HX, 3 GB of memory, a 75-minute limit per bench). The program is the same as 0.5.1.
+Results so far. The 0.5.0 rows come from one CPU-only run on 2026-10-15 (Ollama 0.40.4 in a container limited to 2 cores of an AMD Ryzen 9 5900HX, 3 GB of memory, a 75-minute limit per bench). The program is the same as 0.5.1. The 0.5.1 rows come from one run on 2026-10-16 on the corrected text, in the same container limits (Ollama 0.40.5; an 80-minute limit with context and 50 minutes without), and are in [results/tdc-v1/results.md](results/tdc-v1/results.md). The corrections changed 7 of the first 100 test items: 3 replies to be typed and 4 partner turns.
 
 | fewkeys | model | sentences | mode | items | top1 | top5 | word accuracy | keystroke saving | seconds each |
 |---|---|---|---|---|---|---|---|---|---|
@@ -147,15 +150,19 @@ Results so far. The 0.5.0 rows come from one CPU-only run on 2026-10-15 (Ollama 
 | 0.5.0 | qwen2.5:3b | Turk Dialogues test, first 100 | grammar, 2 rounds, context | 54 (time limit) | 0.056 | 0.093 | 0.325 | -0.136 | 53.1 |
 | 0.5.0 | qwen2.5:1.5b | built-in 40 | grammar, 2 rounds, context | 40 | 0.075 | 0.075 | 0.357 | -0.15 | 29.6 |
 | 0.5.0 | qwen2.5:1.5b | built-in 40 | grammar, 2 rounds, no context | 38 (time limit) | 0.053 | 0.079 | 0.317 | -0.15 | 33.2 |
+| (none) | train-split lookup | Turk Dialogues test, corrected, first 100 | phrase list only | 100 | 0.06 | 0.06 | 0.06 | -0.176 | 0 |
+| 0.5.1 | qwen2.5:1.5b | Turk Dialogues test, corrected, first 100 | grammar, 2 rounds, context | 100 | 0.14 | **0.21** | 0.459 | -0.032 | 32.0 |
+| 0.5.1 | qwen2.5:1.5b | Turk Dialogues test, corrected, first 100 | grammar, 2 rounds, no context | 97 (time limit) | 0.021 | 0.021 | 0.21 | -0.197 | 31.6 |
 
 What these show, and what they don't:
 
-- **The other person's last turn matters most.** On the same 99 Turk dialogues, qwen2.5:1.5b found the exact sentence in its top 5 for 20 with the first turn as context and for 3 without it. 19 sentences were found only with context and 2 only without (exact McNemar test, two-sided p = 0.0002). SpeakFaster also found that context helps a great deal.
-- **Far below fine-tuned models, as expected.** SpeakFaster's fine-tuned 64B cloud model reached 0.726 to 0.763 top-5 on the full corrected test set, and even a fine-tuned T5-small (60M) reached 0.427 there. This small general model, not trained for the task, reached 0.21 on the first 100 uncorrected items.
+- **The other person's last turn matters most.** On the same 99 Turk dialogues, qwen2.5:1.5b found the exact sentence in its top 5 for 20 with the first turn as context and for 3 without it. 19 sentences were found only with context and 2 only without (exact McNemar test, two-sided p = 0.0002). SpeakFaster also found that context helps a great deal. On the corrected text it found 21 of 100 with context and 2 of 97 without.
+- **Far below fine-tuned models, as expected.** SpeakFaster's fine-tuned 64B cloud model reached 0.726 to 0.763 top-5 on the full corrected test set, and even a fine-tuned T5-small (60M) reached 0.427 there. This small general model, not trained for the task, reached 0.21 on the first 100 uncorrected items, and 0.21 again on the first 100 corrected items.
+- **Correcting the text changed little here.** With context, top 5 stayed at 21 of 100 and word accuracy went from 0.442 to 0.459. The corrections touch few of these items, and the model's misses are mostly not typos.
 - **Bigger was not better here.** On the first 54 items, which both runs reached, qwen2.5:1.5b found 11 and qwen2.5:3b found 5 (2 in common). With so few items the difference may be chance (exact McNemar, two-sided p = 0.15).
 - **No keystrokes saved yet.** By fewkeys' strict measure, where every miss means typing the whole sentence, every setting cost slightly more keys than typing in full. Real use would add the person's own phrase history and slash keywords, which this benchmark leaves out, but that has not been measured.
 - **Too slow on 2 cores.** 30 seconds per expansion is far too slow for conversation. Speed on a laptop with more cores or a GPU has not been measured yet.
-- One run each, first 100 test dialogues in file order, uncorrected transcripts. The run was set up by AI agents working for MV2. The per-sentence files repeat the dataset's sentences, so they are not copied here; `turkbench.py report` rebuilds this table from them.
+- One run each, first 100 test dialogues in file order; the 0.5.0 rows use the uncorrected transcripts and the 0.5.1 rows the corrected ones. The runs were set up by AI agents working for MV2. The per-sentence files repeat the dataset's sentences, so they are not copied here; `turkbench.py report` rebuilds this table from them.
 
 ## Status and limits
 
@@ -172,12 +179,13 @@ If you use AAC, or support someone who does, and want to try fewkeys or tell us 
 
 ## Changes
 
+- **After 0.5.1 (on main):** `correct_turk.py` 0.1.0 applies SpeakFaster's published corrections to the Turk Dialogues, with tests. The results table gains the first run on the corrected text ([results/tdc-v1/results.md](results/tdc-v1/results.md)): top 5 21 of 100 with context, as on the uncorrected text. `test_tdc_results.py` checks every number this README quotes from it. `fewkeys.py` is unchanged.
 - **0.5.1:** the file released as 0.5.0 still carried the old licence line in its opening docstring, from before the move to Apache-2.0; 0.5.1 is the same program with the Apache-2.0 notice. The README now quotes SpeakFaster correctly: its 57% is *more motor actions saved than word prediction*, not 57% of all motor actions, and it drew 128 to 256 samples per abbreviation, not always 128. The results table now has the first CPU benchmark of 0.5.0, including what it doesn't show. The README no longer says the page works with switch scanning (it has no scanning mode and has not been tried with switch or eye-gaze software), and no longer makes two laptop claims that were never measured: that the first test ran on a laptop, and how long an expansion takes on one.
 
 ## Development
 
 ```
-python -m unittest test_fewkeys.py test_turkbench.py test_release.py
+python -m unittest test_fewkeys.py test_turkbench.py test_release.py test_correct_turk.py test_tdc_results.py
 ```
 
 Made by MV2 of Munim, Inc. with AI agents. Apache-2.0 license.
